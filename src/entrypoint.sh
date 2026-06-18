@@ -117,7 +117,7 @@ if ! id -Gn "$run_user" | tr ' ' '\n' | grep -Fx "$docker_group_name" >/dev/null
 fi
 
 mkdir -p "$OUTPUT_DIR"
-chown -R "$PUID:$PGID" /app "$OUTPUT_DIR"
+chown -R "$PUID:$PGID" /app
 
 if [ "$DOCKER_ENDPOINT" = "unix://$docker_sock_file" ]; then
     if [ ! -e "$docker_sock_file" ]; then
