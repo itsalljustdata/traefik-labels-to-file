@@ -929,14 +929,14 @@ def run_daemon_mode(args: argparse.Namespace) -> int:
     webhook_server: ThreadingHTTPServer | None = None
     _watch_thread: threading.Thread | None = None
 
-    def countFromDict (theDict: dict[str, Any]) -> int:
+    def countFromDict(theDict: dict[str, Any]) -> int:
         return sum([len(v) for k, v in theDict.items() if k in ("unchanged", "modified", "new") and isinstance(v, list)])
 
     try:
         if not args.skip_initial_run:
-            rc = generate_once(args)            
-            if (cnt := countFromDict(rc)) != 0:
-                return cnt
+            rc = generate_once(args)
+            cnt = countFromDict(rc)
+            LOGGER.info("initial generation complete: %s file(s) processed", cnt)
 
         webhook_server = start_webhook_listener(args, trigger)
         _watch_thread = start_docker_event_watcher(args, trigger, stop)
@@ -951,8 +951,8 @@ def run_daemon_mode(args: argparse.Namespace) -> int:
                 while trigger.is_set():
                     trigger.clear()
             rc = generate_once(args)
-            if (cnt := countFromDict(rc)) != 0:
-                return cnt
+            cnt = countFromDict(rc)
+            LOGGER.info("generation complete: %s file(s) processed", cnt)
     except KeyboardInterrupt:
         return 0
     finally:

@@ -40,6 +40,40 @@ Runtime compose is at:
 
 - compose.yaml
 
+```yaml
+services:
+  traefik-generator:
+    image: ghcr.io/itsalljustdata/traefik-labels-to-file:latest
+    pull_policy: always
+    container_name: traefik-generator
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./dynamic:/dynamic
+    environment:
+      DOCKER_SERVER_NAME: ${DOCKER_SERVER_NAME:?set DOCKER_SERVER_NAME in .env or shell}
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      DOCKER_GID: ${DOCKER_GID:-999}
+      USER_SHELL: ${USER_SHELL:-bash}
+      LOG_LEVEL: ${LOG_LEVEL:-ERROR}
+      LOOP_SECONDS: ${LOOP_SECONDS:-300}
+      WATCH_DOCKER_EVENTS: ${WATCH_DOCKER_EVENTS:-false}
+      EVENT_DEBOUNCE_SECONDS: ${EVENT_DEBOUNCE_SECONDS:-1.5}
+      # DOCKER_ENDPOINT: https://remote-docker-host:2376
+      # UPSTREAM_HOST: remote-docker-host
+      # WEBHOOK_BIND: 0.0.0.0:8080
+      # WEBHOOK_PATH: /generate
+      # WEBHOOK_TOKEN: change-me
+    restart: on-failure:3
+    # Uncomment if using WEBHOOK_BIND
+    # ports:
+    #   - "8080:8080"
+
+    # Keep isolated by default. Disable this if you want webhook-trigger mode.
+    network_mode: none
+```
+
+
 This root compose file:
 - pulls the GHCR image
 - mounts /var/run/docker.sock and ./dynamic
