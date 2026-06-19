@@ -38,7 +38,7 @@ docker compose logs -f traefik-generator
 
 Runtime compose is at:
 
-- docker-compose.yml
+- compose.yaml
 
 This root compose file:
 - pulls the GHCR image
