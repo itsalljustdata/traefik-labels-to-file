@@ -18,6 +18,7 @@ PUID=1000
 PGID=1000
 DOCKER_GID=998
 USER_SHELL=bash
+LOG_LEVEL=ERROR
 ```
 
 Find host docker.sock gid:
@@ -54,6 +55,7 @@ This root compose file:
 | PGID | 1000 | Runtime GID used for the created user |
 | DOCKER_GID | 999 | Host docker.sock group gid |
 | USER_SHELL | bash | User shell for created runtime user; if not absolute, /usr/bin/ is prefixed and it must exist in /etc/shells |
+| LOG_LEVEL | ERROR | Logging verbosity: DEBUG, INFO, WARNING, ERROR, CRITICAL |
 | LOOP_SECONDS | 300 | Sleep interval between runs |
 | WATCH_DOCKER_EVENTS | false | Enable event-triggered runs |
 | EVENT_DEBOUNCE_SECONDS | 1.5 | Debounce delay for event/webhook bursts |

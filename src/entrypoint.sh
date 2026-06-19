@@ -27,6 +27,7 @@ WEBHOOK_BIND="${WEBHOOK_BIND:-}"
 WEBHOOK_PATH="${WEBHOOK_PATH:-/generate}"
 WEBHOOK_TOKEN="${WEBHOOK_TOKEN:-}"
 SKIP_INITIAL_RUN="${SKIP_INITIAL_RUN:-false}"
+LOG_LEVEL="${LOG_LEVEL:-ERROR}"
 PUID="${PUID:-1000}"
 PGID="${PGID:-1000}"
 DOCKER_GID="${DOCKER_GID:-999}"
@@ -178,6 +179,10 @@ fi
 
 if [ "$SKIP_INITIAL_RUN" = "true" ]; then
     ARGS+=("--skip-initial-run")
+fi
+
+if [ -n "$LOG_LEVEL" ]; then
+    ARGS+=("--log-level" "$LOG_LEVEL")
 fi
 
 exec gosu "$run_user" /app/docker_labels_to_dynamic.py "${ARGS[@]}"

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import re
 import socket
@@ -29,6 +30,20 @@ from urllib.parse import urlencode, urlparse
 
 TRUE_VALUES = {"1", "true", "yes", "on"}
 FALSE_VALUES = {"0", "false", "no", "off"}
+LOGGER = logging.getLogger("traefik-labels-to-file")
+
+
+def configure_logging(level_name: str) -> None:
+    level = getattr(logging, level_name.upper(), logging.ERROR)
+    LOGGER.setLevel(level)
+    LOGGER.handlers.clear()
+    LOGGER.propagate = False
+
+    # StreamHandler writes to stderr by default; warning and above are always on stderr.
+    handler = logging.StreamHandler()
+    handler.setLevel(level)
+    handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+    LOGGER.addHandler(handler)
 
 
 class UnixHTTPConnection(HTTPConnection):
@@ -344,10 +359,7 @@ def convert_service_port_to_url(
             continue
 
         if not upstream_host:
-            print(
-                f"warning: service '{service_name}' has loadBalancer.server.port but no --upstream-host; skipping",
-                file=sys.stderr,
-            )
+            LOGGER.debug("service '%s' has loadBalancer.server.port but no --upstream-host; skipping", service_name)
             unpublished.add(service_name)
             continue
 
@@ -356,10 +368,7 @@ def convert_service_port_to_url(
         port_info = resolve_published_tcp_port(container, private_port)
 
         if port_info is None:
-            print(
-                f"warning: service '{service_name}' port {private_port} is not published; skipping",
-                file=sys.stderr,
-            )
+            LOGGER.debug("service '%s' port %s is not published; skipping", service_name, private_port)
             unpublished.add(service_name)
             continue
 
@@ -389,10 +398,7 @@ def merge_with_collision_handling(
         final_name = candidate
         if final_name in aggregate:
             final_name = f"{candidate}__{container_name.replace('.', '_').replace('-', '_')}"
-            print(
-                f"warning: {object_kind} name collision for '{candidate}', using '{final_name}'",
-                file=sys.stderr,
-            )
+            LOGGER.warning("%s name collision for '%s', using '%s'", object_kind, candidate, final_name)
         aggregate[final_name] = cfg
         remap[base_name] = final_name
     return remap
@@ -475,7 +481,8 @@ def dump_yaml(value: Any, indent: int = 0) -> list[str]:
 
 
 def atomic_write(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.parent.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(content, encoding="utf-8")
     tmp.replace(path)
@@ -537,20 +544,34 @@ def build_single_router_config(config: dict[str, Any], router_name: str) -> dict
     return {"http": out_http}
 
 
-def write_split_per_router(
+def write_router_files(
     config: dict[str, Any],
     output_dir: Path,
     docker_server_name: str,
     dry_run: bool,
-) -> int:
+    existing_files: list[Path],
+) -> dict[str,dict[str,str]|list[Path]]:
+
+    retDict = dict (
+                routers={},
+                output_dir=output_dir, # can't do absolute here just in case it doesn't exist yet, but will be updated to absolute path if created
+                unchanged=[],
+                modified=[],
+                new=[],
+                deleted=[],
+    )
+
+    if dry_run:
+        _ = retDict.pop("output_dir")  # not relevant for dry run
+
     routers = config.get("http", {}).get("routers", {})
     if not isinstance(routers, dict) or not routers:
-        if dry_run:
-            print("no routers found")
-            return 0
-        output_dir.mkdir(parents=True, exist_ok=True)
-        print("wrote 0 router files")
-        return 0
+        return retDict
+    
+    if not dry_run:
+        if not output_dir.exists():
+            output_dir.mkdir(parents=True, exist_ok=True)
+        retDict["output_dir"] = retDict["output_dir"].absolute()
 
     written = 0
     for router_name in sorted(routers.keys()):
@@ -562,18 +583,38 @@ def write_split_per_router(
         per_router = build_single_router_config(config, router_name)
         yaml_text = "\n".join(dump_yaml(per_router)) + "\n"
 
+        retDict["routers"][router_name] = file_name
+
         if dry_run:
             print(f"# {file_name}")
             print(yaml_text)
             continue
 
-        output_path = output_dir / file_name
+        output_path = output_dir.joinpath(file_name)
+        if output_path in existing_files:
+            existing_content = output_path.read_text(encoding="utf-8")
+            existing_files.remove(output_path)  # mark as processed
+            if existing_content == yaml_text:
+                retDict["unchanged"].append(output_path.relative_to(output_dir).as_posix())
+                continue  # skip unchanged file
+            else:
+                retDict["modified"].append(output_path.relative_to(output_dir).as_posix())
+        else:
+            retDict["new"].append(output_path.relative_to(output_dir).as_posix())
         atomic_write(output_path, yaml_text)
         written += 1
 
-    if not dry_run:
-        print(f"wrote {written} router file(s) to {output_dir}")
-    return 0
+    for f in existing_files:
+        if f.exists():
+            try:
+                f.unlink()
+                retDict["deleted"].append(f.relative_to(output_dir).as_posix())
+            except PermissionError:
+                LOGGER.warning("failed to delete old file %s (permission denied)", f)
+            except Exception as e:
+                LOGGER.warning("failed to delete old file %s: %s", f, e)
+        
+    return retDict
 
 
 def build_dynamic_config(
@@ -666,14 +707,8 @@ def cli_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--output",
-        default="dynamic.generated.yml",
-        help="Output YAML file path, or output directory when --split-per-router is set.",
-    )
-    parser.add_argument(
-        "--no-split-per-router",
-        action="store_false",
-        dest="split_per_router",
-        help="Write one file per router with filename routerName.hostName.yml.",
+        default="dynamic",
+        help="Output directory for per-router YAML files.",
     )
     parser.add_argument(
         "--docker-server-name",
@@ -747,6 +782,13 @@ def cli_args() -> argparse.Namespace:
         action="store_true",
         help="In daemon mode, do not generate immediately on startup.",
     )
+    parser.add_argument(
+        "--log-level",
+        default=os.getenv("LOG_LEVEL", "ERROR"),
+        choices=[v[0] for v in sorted([(k,v) for v,k in logging._levelToName.items() if v != logging.NOTSET],key = lambda kv: kv[1])],
+        type=lambda s: s.upper(),
+        help="Log verbosity level (default: ERROR).",
+    )
     return parser.parse_args()
 
 
@@ -762,7 +804,7 @@ def filter_by_container_regex(containers: list[dict[str, Any]], pattern: str) ->
     return result
 
 
-def generate_once(args: argparse.Namespace) -> int:
+def generate_once(args: argparse.Namespace) -> dict[str,dict[str,str]|list[Path]]:
     client = DockerAPIClient(endpoint=args.docker_endpoint)
     containers = client.list_containers(include_stopped=args.include_stopped)
     containers = filter_by_container_regex(containers, args.container_name_regex)
@@ -776,32 +818,23 @@ def generate_once(args: argparse.Namespace) -> int:
         name_prefix=effective_name_prefix,
         docker_hostname=docker_server_name,
     )
+    LOGGER.debug(f"\n{json.dumps(config, indent=2, default=str)}")
 
     output = Path(args.output)
-    if (not args.dry_run) and output.exists():
-        if output.is_file():
-            output.unlink()
-        elif output.is_dir():
-            existing = output.glob(f"{docker_server_name}*.yml")
-            for file in existing:
-                file.unlink()
+    if output.exists() and output.is_file():
+        raise ValueError(f"--output must be a directory, but file exists: {output}")
 
-    if (not args.dry_run) and args.split_per_router:
-        return write_split_per_router(
-            config,
-            output_dir=output,
-            docker_server_name=docker_server_name,
-            dry_run=args.dry_run,
-        )
+    existing_files = list(output.glob(f"{docker_server_name}*.yml"))
 
-    yaml_text = "\n".join(dump_yaml(config)) + "\n"
-    if args.dry_run:
-        print(yaml_text)
-        return 0
+    retDict = write_router_files(
+                    config,
+                    output_dir=output,
+                    docker_server_name=docker_server_name,
+                    dry_run=args.dry_run,
+                    existing_files=existing_files
+                )
 
-    atomic_write(output, yaml_text)
-    print(f"wrote {output} with {len(config.get('http', {}).get('routers', {}))} router(s)")
-    return 0
+    return retDict
 
 
 def parse_host_port(bind: str) -> tuple[str, int]:
@@ -859,7 +892,7 @@ def start_webhook_listener(args: argparse.Namespace, trigger: threading.Event) -
     server = ThreadingHTTPServer((host, port), WebhookHandler)
     thread = threading.Thread(target=server.serve_forever, name="webhook-listener", daemon=True)
     thread.start()
-    print(f"webhook listener active on {host}:{port}{webhook_path}")
+    LOGGER.info("webhook listener active on %s:%s%s", host, port, webhook_path)
     return server
 
 
@@ -881,12 +914,12 @@ def start_docker_event_watcher(args: argparse.Namespace, trigger: threading.Even
             except Exception as exc:
                 if stop.is_set():
                     break
-                print(f"warning: event watcher reconnecting after error: {exc}", file=sys.stderr)
+                LOGGER.warning("event watcher reconnecting after error: %s", exc)
                 time.sleep(2)
 
     thread = threading.Thread(target=watch, name="docker-event-watcher", daemon=True)
     thread.start()
-    print("docker event watcher active")
+    LOGGER.info("docker event watcher active")
     return thread
 
 
@@ -896,11 +929,14 @@ def run_daemon_mode(args: argparse.Namespace) -> int:
     webhook_server: ThreadingHTTPServer | None = None
     _watch_thread: threading.Thread | None = None
 
+    def countFromDict (theDict: dict[str, Any]) -> int:
+        return sum([len(v) for k, v in theDict.items() if k in ("unchanged", "modified", "new") and isinstance(v, list)])
+
     try:
         if not args.skip_initial_run:
-            rc = generate_once(args)
-            if rc != 0:
-                return rc
+            rc = generate_once(args)            
+            if (cnt := countFromDict(rc)) != 0:
+                return cnt
 
         webhook_server = start_webhook_listener(args, trigger)
         _watch_thread = start_docker_event_watcher(args, trigger, stop)
@@ -915,8 +951,8 @@ def run_daemon_mode(args: argparse.Namespace) -> int:
                 while trigger.is_set():
                     trigger.clear()
             rc = generate_once(args)
-            if rc != 0:
-                return rc
+            if (cnt := countFromDict(rc)) != 0:
+                return cnt
     except KeyboardInterrupt:
         return 0
     finally:
@@ -928,15 +964,25 @@ def run_daemon_mode(args: argparse.Namespace) -> int:
 
 def main() -> int:
     args = cli_args()
+    configure_logging(args.log_level)
     try:
         daemon_mode = bool(args.watch_docker_events or args.webhook_bind or args.loop_seconds > 0)
         if daemon_mode:
-            return run_daemon_mode(args)
-        return generate_once(args)
+            retDict = run_daemon_mode(args)
+        else:
+            retDict = generate_once(args)
+        LOGGER.info(f"\n{json.dumps(retDict, indent=2, default=str)}")
+        ret = 0
+        return ret
     except Exception as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
+        LOGGER.error("%s", exc)
+        ret = 1
+        return ret
+    finally:
+        LOGGER.debug(f"execution completed : {ret}")
+        logging.shutdown()
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
